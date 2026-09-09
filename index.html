@@ -104,6 +104,13 @@ nav button.on{background:var(--panel2);border-color:#8A6BFF;color:#fff}
 .lesson ul{margin:12px 0 12px 22px}
 .lesson li{margin:6px 0}
 .keybox{border-left:3px solid var(--gold);background:#00000030;padding:12px 16px;border-radius:0 11px 11px 0;margin:16px 0}
+.readbar{position:sticky;top:0;z-index:5;background:linear-gradient(180deg,var(--void),#0E0720dd);
+  padding:10px 0 12px;margin-bottom:4px}
+.readbar .lab{display:flex;justify-content:space-between;font-size:12.5px;color:var(--dim);margin-bottom:6px}
+.readbar .track{height:8px;border-radius:99px;background:#0C0620;border:1px solid var(--line);overflow:hidden}
+.readbar .track i{display:block;height:100%;background:linear-gradient(90deg,var(--xp),var(--def));transition:width .2s}
+.checkq{padding:14px;border:1px solid var(--line);border-radius:12px;background:#00000030;margin-bottom:12px}
+.checkq .qq{font-weight:600;font-size:15.5px;margin-bottom:10px;line-height:1.5}
 .diffs{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:8px}
 .diff{text-align:left;padding:16px}
 .diff .t{font-size:17px;font-weight:700}
@@ -147,6 +154,7 @@ nav button.on{background:var(--panel2);border-color:#8A6BFF;color:#fff}
 .qtext{font-size:17.5px;font-weight:600;margin:14px 0 14px;line-height:1.5}
 .opts{display:grid;gap:9px}
 .opt{text-align:left;padding:13px 15px;font-size:15px;font-weight:500;background:#00000030;line-height:1.5}
+.opt.pick{background:#2B1B60;border-color:var(--xp)}
 .opt.right{background:#1B6B45;border-color:var(--hp)}
 .opt.wrong{background:#6B1B2E;border-color:var(--atk)}
 .log{margin-top:14px;font-size:14px;min-height:24px;color:var(--dim)}
@@ -1372,7 +1380,7 @@ const CFG = {
     medium: { nm:"กลาง", hp:80,  time:22, foe:{atk:15,pen:8},  acc:.60, hide:"half",  xp:70,  first:140, need:[2] },
     hard:   { nm:"ยาก",  hp:100, time:16, foe:{atk:20,pen:10}, acc:.75, hide:"always",xp:110, first:220, need:[3] }
   },
-  readSeconds: 10,
+  readMin: 15, readMax: 45,        // เวลาอ่านขั้นต่ำ–สูงสุด คิดจากความยาวใบความรู้
   unlockPvpAfter: 5,
   pvpTime: 20,
   godMinRp: 4000, godTop: 10
@@ -1546,6 +1554,7 @@ function refreshTop(){
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>go(b.dataset.v));
 function go(v){
   clearInterval(TICK);
+  if(v!=="lesson"){stopRead();READ=null}
   if(MTICK&&v!=="battle"){stopSearch(); if(LIVE.ready())LIVE.leave();}
   if(B&&B.live&&!B.ended&&v!=="battle"){
     B.ended=true; if(LIVE.ready())LIVE.quit(B.mid,B.side); liveCleanup();
@@ -1587,35 +1596,128 @@ function drawMap(){
    ======================================================================= */
 let TICK=null;
 const HIDE_TXT={never:"เห็นท่ามอนสเตอร์ตลอด",half:"มอนสเตอร์ปิดไพ่เมื่อเลือดเหลือไม่ถึงครึ่ง",always:"มอนสเตอร์ปิดไพ่ตั้งแต่ต้น"};
+let READ=null;                               // สถานะการอ่านของด่านที่เปิดอยู่
+
+/* เวลาอ่านขั้นต่ำคิดจากความยาวใบความรู้ อยู่ระหว่าง 15–45 วินาที */
+function readSeconds(st){
+  const chars=st.lesson.replace(/<[^>]+>/g,"").length;
+  return Math.min(CFG.readMax, Math.max(CFG.readMin, Math.round(chars/50)));
+}
+function hasRead(n){ return !!(U.read&&U.read[n]) || Object.keys(U.clear[n]||{}).length>0 }
+
 function openStage(n){
-  const s=STAGES.find(x=>x.n===n), c=U.clear[n]||{};
+  const st=STAGES.find(x=>x.n===n), c=U.clear[n]||{};
+  U.read=U.read||{};
+  const done=hasRead(n);
+  const rec=U.read[n];
   $("viewLesson").innerHTML=`
     <button class="ghost" onclick="go('map')" style="margin-bottom:14px">← กลับแผนที่</button>
-    <div class="panel lesson">
+    ${done?`<div class="panel" style="border-color:var(--hp);margin-bottom:16px">
+        <b style="color:var(--hp)">✓ ผ่านการตรวจการอ่านของด่านนี้แล้ว</b>
+        <p class="note" style="margin-top:4px">${rec?`อ่านเมื่อ ${new Date(rec.at).toLocaleString("th-TH")} · ใช้เวลา ${rec.sec} วินาที`:"ผ่านด่านนี้มาแล้ว"} — เลือกระดับด้านล่างได้เลย จะอ่านทบทวนอีกรอบก็ได้</p>
+      </div>`
+      :`<div class="readbar" id="readBar">
+        <div class="lab"><span>อ่านใบความรู้ให้ครบก่อนเข้าด่าน</span><span id="readPct">0%</span></div>
+        <div class="track"><i id="readFill" style="width:0%"></i></div>
+        <div class="lab" style="margin:6px 0 0"><span id="readHint">เลื่อนอ่านลงไปจนสุดหน้า</span><span id="readTime"></span></div>
+      </div>`}
+    <div class="panel lesson" id="lessonBox">
       <span class="tag">ด่าน ${n}</span>
-      <h2 style="margin-top:10px">${s.ic} ${s.t}</h2>
-      ${s.lesson}
+      <h2 style="margin-top:10px">${st.ic} ${st.t}</h2>
+      ${st.lesson}
     </div>
-    <div class="panel" style="margin-top:16px">
+    <div id="gateBox" style="margin-top:16px"></div>`;
+  go("lesson");
+  if(done) return showDiffs(n);
+  READ={n,need:readSeconds(st),sec:0,scroll:0,tries:0};
+  $("gateBox").innerHTML=`<div class="panel"><p class="note">อ่านให้ครบแล้วจะมีแบบตรวจการอ่าน 2 ข้อ ตอบถูกทั้งสองข้อจึงเข้าด่านได้ · ตอบผิดไม่มีบทลงโทษ อ่านทบทวนแล้วลองใหม่ได้ไม่จำกัด</p></div>`;
+  READ_H=()=>updateRead();
+  window.addEventListener("scroll",READ_H,{passive:true});
+  updateRead();
+  TICK=setInterval(()=>{READ.sec++;updateRead()},1000);
+}
+let READ_H=null;
+function stopRead(){ if(READ_H){window.removeEventListener("scroll",READ_H);READ_H=null} }
+
+function updateRead(){
+  if(!READ)return;
+  const box=$("lessonBox"); if(!box)return;
+  const r=box.getBoundingClientRect();
+  const seen=Math.min(1,Math.max(0,(window.innerHeight-r.top)/Math.max(1,r.height)));
+  READ.scroll=Math.max(READ.scroll,seen);
+  const timePart=Math.min(1,READ.sec/READ.need);
+  const pct=Math.round((READ.scroll*0.6+timePart*0.4)*100);
+  const f=$("readFill"), p=$("readPct"), h=$("readHint"), t=$("readTime");
+  if(f)f.style.width=pct+"%";
+  if(p)p.textContent=pct+"%";
+  if(t)t.textContent=READ.sec<READ.need?`เหลืออีก ${READ.need-READ.sec} วินาที`:"ครบเวลาแล้ว";
+  const ok=READ.scroll>=0.98 && READ.sec>=READ.need;
+  if(h)h.textContent = ok?"พร้อมทำแบบตรวจการอ่านแล้ว"
+      : READ.scroll<0.98 ? "เลื่อนอ่านลงไปจนสุดหน้า" : "อ่านครบแล้ว รออีกนิด";
+  if(ok && !READ.ready){ READ.ready=true; clearInterval(TICK); openCheck(); }
+}
+
+/* ---------- แบบตรวจการอ่าน 2 ข้อ ---------- */
+function openCheck(){
+  const st=STAGES.find(x=>x.n===READ.n);
+  const pool=st.q.filter(q=>q.lv===1);
+  READ.qs=shuffle(pool.slice()).slice(0,2).map(q=>({q,order:shuffle(q.c.map((t,i)=>({t,i}))),pick:null}));
+  drawCheck();
+  $("gateBox").scrollIntoView({behavior:"smooth",block:"start"});
+}
+function drawCheck(msg){
+  $("gateBox").innerHTML=`
+    <div class="panel">
+      <h3>แบบตรวจการอ่าน</h3>
+      <p class="note" style="margin:6px 0 14px">ตอบให้ถูกทั้ง 2 ข้อเพื่อเข้าด่าน ${READ.tries?`· พยายามครั้งที่ ${READ.tries+1}`:""}</p>
+      ${READ.qs.map((it,qi)=>`<div class="checkq">
+        <div class="qq">${qi+1}. ${it.q.q}</div>
+        <div class="opts">${it.order.map((o,k)=>
+          `<button class="opt ${it.pick===o.i?"pick":""}" onclick="pickCheck(${qi},${o.i})">${"กขคง"[k]}. ${o.t}</button>`).join("")}</div>
+      </div>`).join("")}
+      <div class="msg ${msg&&msg.ok?"ok":""}" id="checkMsg">${msg?msg.text:""}</div>
+      <button class="primary wide" onclick="submitCheck()">ตรวจคำตอบ</button>
+    </div>`;
+}
+function pickCheck(qi,i){ READ.qs[qi].pick=i; drawCheck(); }
+async function submitCheck(){
+  if(READ.qs.some(x=>x.pick===null))
+    return drawCheck({text:"ยังตอบไม่ครบทั้ง 2 ข้อ"});
+  const wrong=READ.qs.filter(x=>x.pick!==x.q.a);
+  READ.tries++;
+  if(wrong.length){
+    const st=STAGES.find(x=>x.n===READ.n);
+    const pool=st.q.filter(q=>q.lv===1);
+    READ.qs=shuffle(pool.slice()).slice(0,2).map(q=>({q,order:shuffle(q.c.map((t,i)=>({t,i}))),pick:null}));
+    drawCheck({text:`ยังไม่ถูก ${wrong.length} ข้อ — เลื่อนขึ้นไปอ่านทบทวนแล้วลองใหม่ได้เลย (เปลี่ยนเป็นคำถามชุดใหม่ให้แล้ว)`});
+    return;
+  }
+  U.read=U.read||{};
+  U.read[READ.n]={at:Date.now(),sec:READ.sec,tries:READ.tries};
+  await commit();
+  stopRead();
+  const n=READ.n;READ=null;
+  showDiffs(n,true);
+}
+
+/* ---------- เลือกระดับความยาก ---------- */
+function showDiffs(n,justPassed){
+  const st=STAGES.find(x=>x.n===n), c=U.clear[n]||{};
+  const bar=$("readBar"); if(bar)bar.remove();
+  $("gateBox").innerHTML=`
+    <div class="panel">
+      ${justPassed?`<p class="msg ok" style="margin:0 0 12px">ผ่านแบบตรวจการอ่านแล้ว เข้าด่านได้เลย</p>`:""}
       <h3 style="margin-bottom:6px">เลือกระดับความยาก</h3>
-      <p class="note" style="margin-bottom:12px">ระดับต่างกันที่ความยากของข้อสอบ พลังชีวิตของมอนสเตอร์ เวลาตอบ และการปิดไพ่</p>
-      <div id="lockNote" class="note" style="margin-bottom:12px">อ่านใบความรู้ก่อน — เปิดให้ต่อสู้ใน <b id="cd">${CFG.readSeconds}</b> วินาที</div>
-      <div class="diffs" id="diffBox">
-      ${["easy","medium","hard"].map(d=>{const D=CFG.diff[d];const np=s.q.filter(q=>D.need.includes(q.lv)).length;return `
-        <button class="diff" disabled data-d="${d}" onclick="startStage(${n},'${d}')">
+      <p class="note" style="margin-bottom:14px">ระดับต่างกันที่ความยากของข้อสอบ พลังชีวิตของมอนสเตอร์ เวลาตอบ และการปิดไพ่</p>
+      <div class="diffs">
+      ${["easy","medium","hard"].map(d=>{const D=CFG.diff[d];const np=st.q.filter(q=>D.need.includes(q.lv)).length;return `
+        <button class="diff" onclick="startStage(${n},'${d}')">
           <div class="t">${D.nm} ${c[d]?"★":""}</div>
           <div class="d">ข้อสอบระดับ ${D.need[0]} · ${np} ข้อ<br>มอนสเตอร์ ${D.hp} HP · ตอบใน ${D.time} วิ<br>${HIDE_TXT[D.hide]}<br>ได้ ${D.xp} XP${c[d]?"":` (ครั้งแรก +${D.first})`}</div>
         </button>`}).join("")}
       </div>
     </div>`;
-  go("lesson");
-  let t=CFG.readSeconds;
-  TICK=setInterval(()=>{
-    t--; const el=$("cd"); if(el)el.textContent=t;
-    if(t<=0){clearInterval(TICK);
-      document.querySelectorAll("#diffBox .diff").forEach(b=>b.disabled=false);
-      const ln=$("lockNote"); if(ln)ln.innerHTML="พร้อมแล้ว เลือกระดับที่ต้องการท้าทาย";}
-  },1000);
+  if(justPassed)$("gateBox").scrollIntoView({behavior:"smooth",block:"start"});
 }
 
 /* =======================================================================
@@ -2342,7 +2444,9 @@ async function drawAdmin(){
 
     <div class="panel">
       <h3>จัดการผู้เล่น</h3>
-      <p class="note" style="margin:6px 0 12px">แก้ชื่อเล่นได้ทันทีโดยไม่ติดกำหนด ${CFG.nickCooldownDays} วัน และแก้คะแนนแรงค์ได้โดยตรง</p>
+      <p class="note" style="margin:6px 0 12px">แก้ชื่อ–สกุลจริง ชื่อเล่น และคะแนนแรงค์ได้โดยตรง ·
+      การแก้ชื่อเล่นที่นี่ไม่ติดกำหนด ${CFG.nickCooldownDays} วัน และไม่รีเซ็ตเวลานับถอยหลังของนักเรียน ·
+      แก้บัญชีตัวเองได้เช่นกัน</p>
       <label for="adminSearch">ค้นหาด้วยชื่อผู้ใช้ (พิมพ์ตัวขึ้นต้น เช่น m1-)</label>
       <input id="adminSearch" value="${ADMINQ}" placeholder="เว้นว่างเพื่อดู 40 อันดับคะแนนสูงสุด">
       <p class="note" style="margin:10px 0 14px">แสดง ${ADMINLIST.length} รายการ</p>
@@ -2354,7 +2458,9 @@ async function drawAdmin(){
               <div class="note">${u.real||"ไม่ระบุชื่อจริง"} · ชื่อผู้ใช้ ${k} · เลเวล ${L.lv} · ${clearedCount(u)}/20 ด่าน</div></div>
             <div style="color:${R.c};font-family:'Bai Jamjuree';font-weight:700">${k===CFG.adminUser?"—":R.full}</div>
           </div>
-          <div class="adminfields">
+          <div><label for="ax${i}" style="margin-top:0">ชื่อ–สกุล จริง</label>
+            <input id="ax${i}" maxlength="60" value="${(u.real||"").replace(/"/g,"&quot;")}" placeholder="เช่น สมชาย ใจดี ม.1/2"></div>
+          <div class="adminfields" style="margin-top:10px">
             <div><label for="an${i}" style="margin-top:0">ชื่อเล่น</label>
               <input id="an${i}" maxlength="16" value="${(u.nick||"").replace(/"/g,"&quot;")}" placeholder="เว้นว่างเพื่อลบชื่อเล่น"></div>
             <div><label for="ar${i}" style="margin-top:0">คะแนนแรงค์ (ปัจจุบัน ${u.rp||0})</label>
@@ -2381,8 +2487,13 @@ async function adminSave(i){
   const e=ADMINLIST[i]; if(!e)return;
   const k=e.k,u=e.u;
   const nick=$("an"+i).value.trim();
+  const real=$("ax"+i).value.trim().replace(/\s+/g," ");
   const rp=Math.max(0,Math.round(Number($("ar"+i).value)||0));
   const notes=[];
+  if(real!==(u.real||"")){
+    if(real.length>60){ADMINMSG[k]={text:"ชื่อ–สกุลยาวเกิน 60 ตัวอักษร"};return drawAdmin()}
+    u.real=real;notes.push(real?`แก้ชื่อเป็น ${real}`:"ลบชื่อ–สกุลแล้ว");
+  }
   if(nick!==(u.nick||"")){
     if(nick&&(nick.length<2||nick.length>16)){ADMINMSG[k]={text:"ชื่อเล่นต้องยาว 2–16 ตัวอักษร"};return drawAdmin()}
     u.nick=nick;notes.push(nick?`ตั้งชื่อเล่นเป็น ${nick}`:"ลบชื่อเล่นแล้ว");
