@@ -1095,6 +1095,10 @@ const FIREBASE_CONFIG = {
   appId:             "1:38039782060:web:60344989d5b9658894d509"
 };
 
+/* App Check — กันคนก๊อปคีย์ไปเรียกฐานข้อมูลจากเว็บอื่น
+   วางคีย์ reCAPTCHA v3 Site key ตรงนี้ (ดูวิธีในคำแนะนำ) ถ้าเว้นว่างไว้จะไม่เปิดใช้ */
+const RECAPTCHA_SITE_KEY = "";
+
 /* =======================================================================
    ส่วนที่ 2B : ชั้นจัดการข้อมูล (ทำงานได้ทั้งบนคลาวด์และออฟไลน์)
    ======================================================================= */
@@ -1105,8 +1109,18 @@ async function dalInit(){
   if(!FIREBASE_CONFIG.apiKey || !FIREBASE_CONFIG.projectId) return false;
   try{
     const A = await import(SDK+"firebase-app.js");
-    fx      = await import(SDK+"firebase-firestore.js");
-    FS = fx.getFirestore(A.initializeApp(FIREBASE_CONFIG));
+    const app = A.initializeApp(FIREBASE_CONFIG);
+    if(RECAPTCHA_SITE_KEY){
+      try{
+        const AC = await import(SDK+"firebase-app-check.js");
+        AC.initializeAppCheck(app,{
+          provider:new AC.ReCaptchaV3Provider(RECAPTCHA_SITE_KEY),
+          isTokenAutoRefreshEnabled:true
+        });
+      }catch(e){ console.warn("เปิด App Check ไม่สำเร็จ:", e.message||e); }
+    }
+    fx = await import(SDK+"firebase-firestore.js");
+    FS = fx.getFirestore(app);
     await fx.getDoc(fx.doc(FS,"meta","season"));      // ทดสอบว่าอ่านได้จริง
     CLOUD = true;
   }catch(e){
@@ -1128,10 +1142,12 @@ const DAL = {
   async createUser(k,u){
     if(!CLOUD){ if(DB.users[k])return false; DB.users[k]=u; save(DB); return true }
     if((await fx.getDoc(uRef(k))).exists()) return false;
-    await fx.setDoc(uRef(k), Object.assign({uname:k}, u));
+    ["xp","rp","bestRp","wins","losses","plays","nickAt"].forEach(f=>u[f]=Math.max(0,Math.round(u[f]||0)));
+    await fx.setDoc(uRef(k), Object.assign({}, u, {uname:k}));
     return true;
   },
   async saveUser(k,u){
+    ["xp","rp","bestRp","wins","losses","plays","nickAt"].forEach(f=>u[f]=Math.max(0,Math.round(u[f]||0)));
     if(!CLOUD){ DB.users[k]=u; save(DB); return }
     await fx.setDoc(uRef(k), u, {merge:true});
   },
@@ -1363,6 +1379,7 @@ async function refreshPos(){
 }
 
 function rankOf(rp,pos){
+  rp = Number(rp); if(!isFinite(rp)||rp<0) rp = 0;
   if(rp>=CFG.godMinRp && pos && pos<=CFG.godTop)
     return {t:7,nm:"เทพคอม",div:0,c:TIERS[7].c,full:"เทพคอม"};
   if(rp>=3001) return {t:6,nm:"ซูพรีม",div:0,c:TIERS[6].c,full:"ซูพรีม"};
@@ -1570,46 +1587,62 @@ function tierRange(t){                      // ช่วงคะแนนที
   const lo=Math.max(0,t-CFG.tierGap), hi=Math.min(TIERS.length-2,t+CFG.tierGap);
   return {lo:TIERS[lo].lo, hi: hi>=6 ? 999999 : TIERS[hi].hi};
 }
+/* คืนค่า {list, scanned, error} เพื่อให้รู้ว่าหาไม่เจอเพราะอะไร */
 async function eligibleFoes(myT){
   const r=tierRange(myT);
-  const list=await DAL.foesInRange(r.lo,r.hi);
-  return list.map(x=>({k:x.k,nm:dispName(x.u,x.k),rp:x.u.rp||0,rk:rankOf(x.u.rp||0,null)}))
-             .filter(x=>Math.abs(x.rk.t-myT)<=CFG.tierGap);
+  try{
+    const raw=await DAL.foesInRange(r.lo,r.hi);
+    const list=raw.map(x=>({k:x.k,nm:dispName(x.u,x.k),rp:x.u.rp||0,rk:rankOf(x.u.rp||0,null)}))
+                  .filter(x=>Math.abs(x.rk.t-myT)<=CFG.tierGap);
+    return {list, scanned:raw.length, error:null};
+  }catch(e){
+    console.error("จับคู่ไม่สำเร็จ:",e);
+    return {list:[], scanned:0, error:(e&&e.message)||String(e)};
+  }
 }
 let MTICK=null;
 async function startRanked(){
   const R=rankOf(U.rp,MYPOS);
-  const pool=await eligibleFoes(R.t);
-  if(pool.length) return beginMatch(pool[Math.floor(Math.random()*pool.length)],R);
-  searchMatch(R);
+  const res=await eligibleFoes(R.t);
+  if(res.list.length) return beginMatch(res.list[Math.floor(Math.random()*res.list.length)],R);
+  searchMatch(R,res);
 }
-function searchMatch(R){
-  let left=CFG.matchSeconds;
+function searchMatch(R,first){
+  let left=CFG.matchSeconds, found=0, scanned=first?first.scanned:0, err=first?first.error:null;
   const lo=Math.max(0,R.t-CFG.tierGap), hi=Math.min(TIERS.length-1,R.t+CFG.tierGap);
   const span=TIERS.slice(lo,hi+1).map(x=>`<span style="color:${x.c}">${x.nm}</span>`).join(" · ");
-  const paint=()=>{$("mmT").textContent=`${Math.floor(left/60)}:${String(left%60).padStart(2,"0")}`};
+  const paint=()=>{
+    const t=$("mmT"); if(t)t.textContent=`${Math.floor(left/60)}:${String(left%60).padStart(2,"0")}`;
+    const d=$("mmInfo"); if(d)d.innerHTML=
+      err ? `<b style="color:var(--atk)">อ่านข้อมูลผู้เล่นไม่สำเร็จ: ${err}</b>`
+          : `พบผู้เล่นที่คะแนนอยู่ในช่วงนี้ <b>${scanned}</b> คน · เข้าเกณฑ์จับคู่ <b>${found}</b> คน`
+          + (scanned===0?`<br><span style="color:var(--gold)">ยังไม่มีเพื่อนคนอื่นอยู่ในช่วงแรงค์นี้ — ให้เพื่อนสมัครและเล่นด่านให้ผ่าน ${CFG.unlockPvpAfter} ด่านก่อน</span>`:"");
+  };
   $("viewBattle").innerHTML=`
     <div class="panel result">
       <div style="font-size:52px">🔍</div>
       <h2 style="margin:10px 0 6px">กำลังหาคู่ประลอง</h2>
       <p class="note">หาผู้เล่นในช่วงแรงค์ ${span}</p>
       <p class="dsp" style="font-size:34px;margin:14px 0" id="mmT">3:00</p>
-      <p class="note">ถ้าครบเวลาแล้วยังไม่เจอ จะจับคู่กับบอทแรงค์ ${R.nm} ให้อัตโนมัติ</p>
+      <p class="note" id="mmInfo"></p>
+      <p class="note" style="margin-top:8px">ถ้าครบเวลาแล้วยังไม่เจอ จะจับคู่กับบอทแรงค์ ${R.nm} ให้อัตโนมัติ</p>
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:18px">
-        <button class="primary" onclick="stopSearch();beginMatch(null,rankOf(U.rp,MYPOS))">สู้กับบอทเลย</button>
+        <button class="primary" onclick="skipSearch()">สู้กับบอทเลย</button>
         <button class="ghost" onclick="stopSearch();go('pvp')">ยกเลิก</button>
       </div>
     </div>`;
   go("battle");paint();
   MTICK=setInterval(async()=>{
     left--;paint();
-    if(left%5===0){
-      const pool=await eligibleFoes(R.t);
-      if(pool.length&&MTICK){stopSearch();return beginMatch(pool[Math.floor(Math.random()*pool.length)],R)}
+    if(left%3===0){
+      const res=await eligibleFoes(R.t);
+      scanned=res.scanned; found=res.list.length; err=res.error; paint();
+      if(res.list.length&&MTICK){stopSearch();return beginMatch(res.list[Math.floor(Math.random()*res.list.length)],R)}
     }
     if(left<=0){stopSearch();beginMatch(null,R)}
   },1000);
 }
+function skipSearch(){stopSearch();beginMatch(null,rankOf(U.rp,MYPOS))}
 function stopSearch(){clearInterval(MTICK);MTICK=null}
 
 function beginMatch(opp,R){
@@ -1903,7 +1936,8 @@ async function drawPvp(){
       ${skills.length?`<p class="note" style="margin-top:12px">สกิลที่ปลดล็อกแล้ว: ${skills.join(" · ")}</p>`
         :`<p class="note" style="margin-top:12px">ยังไม่มีสกิลพิเศษ — ถึงแพลทินัมจะได้ 💚 ฮีล และเลือดเพิ่มเป็น ${CFG.pvpHpHigh} ถึงซูพรีมจะได้ 💥 อัลติเมท</p>`}
       ${nextAt?`<p class="note">อีก ${Math.max(0,nextAt-U.rp)} คะแนนจะขึ้นขั้นถัดไป</p>`:""}
-      <button class="primary wide" style="margin-top:16px" onclick="startRanked()">เริ่มประลอง</button>
+      <p class="note" id="foeCount" style="margin-top:12px">กำลังตรวจว่ามีใครอยู่ในช่วงแรงค์ของคุณบ้าง...</p>
+      <button class="primary wide" style="margin-top:8px" onclick="startRanked()">เริ่มประลอง</button>
       <p class="note" style="margin-top:14px">ระบบจะจับคู่กับผู้เล่นที่แรงค์ห่างจากคุณไม่เกิน ${CFG.tierGap} ขั้น (${TIERS.slice(Math.max(0,R.t-CFG.tierGap),Math.min(TIERS.length,R.t+CFG.tierGap+1)).map(x=>x.nm).join(" · ")})
       ถ้าหาไม่เจอภายใน ${Math.round(CFG.matchSeconds/60)} นาที จะจับคู่กับบอทแรงค์ ${R.nm} ที่ตอบถูก ${Math.round(CFG.botAcc[R.t]*100)}% ให้แทน ·
       ต้องเลือกท่าภายใน ${CFG.pickSeconds} วินาที ไม่ทันระบบจะสุ่มให้ ·
@@ -1913,6 +1947,14 @@ async function drawPvp(){
       <h2>ตารางแรงค์</h2>
       ${rankTable(U.rp)}
     </div>`;
+  eligibleFoes(R.t).then(res=>{
+    const el=$("foeCount"); if(!el)return;
+    el.innerHTML = res.error
+      ? `<b style="color:var(--atk)">อ่านข้อมูลผู้เล่นไม่สำเร็จ: ${res.error}</b>`
+      : res.list.length
+        ? `พร้อมจับคู่กับเพื่อน <b style="color:var(--hp)">${res.list.length}</b> คนในช่วงแรงค์นี้ — กดเริ่มได้เลย`
+        : `<b style="color:var(--gold)">ยังไม่มีเพื่อนคนอื่นในช่วงแรงค์นี้</b> ระบบจะรอหา ${Math.round(CFG.matchSeconds/60)} นาทีแล้วจับคู่กับบอทให้`;
+  });
 }
 async function drawBoard(){
   $("viewBoard").innerHTML=`<div class="panel result"><p class="note">กำลังโหลดกระดาน...</p></div>`;
