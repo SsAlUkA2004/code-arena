@@ -1912,16 +1912,22 @@ function answer(i,btn){
   clearInterval(TICK);
   document.querySelectorAll(".opt").forEach(b=>{b.disabled=true;if(+b.dataset.i===B.q.a)b.classList.add("right")});
   const meOK=(i===B.q.a);
+  B.selfTimeout=(i<0);
   if(!meOK&&btn)btn.classList.add("wrong");
   if(B.live) return submitLive(meOK);
   resolveRound(meOK, Math.random()<B.foe.acc);
 }
 async function submitLive(meOK){
-  $("log").innerHTML=`ส่งคำตอบแล้ว กำลังรอ <b>${B.foe.nm}</b> ตอบ...`;
+  let wait=CFG.pvpTime+12;
+  const show=()=>{const el=$("log"); if(el)el.innerHTML=
+    `ส่งคำตอบแล้ว กำลังรอ <b>${B.foe.nm}</b> ตอบ... <b style="color:var(--gold)">${wait}</b> วินาที`};
+  show();
+  const wt=setInterval(()=>{wait--;show();if(wait<=0)clearInterval(wt)},1000);
   let unsub=null, done=false;
   const other=B.side==="a"?"b":"a";
   const close=fp=>{
     if(done)return; done=true;
+    clearInterval(wt);
     if(unsub)unsub(); clearTimeout(dl);
     B.foeMove = (fp&&fp.mv) ? fp.mv : "atk";
     B.foeHealed = (fp&&fp.heal) ? CFG.heal : 0;
@@ -1935,6 +1941,14 @@ async function submitLive(meOK){
   }catch(e){ console.error(e); close(null) }
 }
 function resolveRound(meOK,foeOK,timedOut){
+  try{ resolveInner(meOK,foeOK,timedOut) }
+  catch(err){
+    console.error("สรุปผลรอบไม่สำเร็จ:",err);
+    $("log").innerHTML=`<b style="color:var(--atk)">เกิดข้อผิดพลาดในรอบนี้ ข้ามไปรอบถัดไป</b>`;
+    paintHP();setTimeout(nextRound,1500);
+  }
+}
+function resolveInner(meOK,foeOK,timedOut){
   if(meOK){B.correct++; B.myMove==="ult"?B.me.streak=0:B.me.streak++;} else B.me.streak=0;
   if(foeOK){B.foeMove==="ult"?B.foe.streak=0:B.foe.streak++;} else B.foe.streak=0;
 
@@ -1943,7 +1957,7 @@ function resolveRound(meOK,foeOK,timedOut){
   if(B.foeHealed)lines.push(`💚 ${B.foe.nm} ใช้สกิลฮีล ฟื้น ${B.foeHealed} HP`);
   lines.push(`${B.foeHidden?`${B.foe.nm} เปิดไพ่: `:``}${moveTag(B.foeMove)} · คุณเลือก ${moveTag(B.myMove)}`);
   lines.push(meOK?`<b style="color:var(--hp)">คุณตอบถูก</b> — ท่าของคุณทำงาน`
-                 :`<b style="color:var(--atk)">${i<0?"คุณหมดเวลา":"คุณตอบผิด"}</b> — ท่าของคุณไม่ทำงาน`);
+                 :`<b style="color:var(--atk)">${B.selfTimeout?"คุณหมดเวลา":"คุณตอบผิด"}</b> — ท่าของคุณไม่ทำงาน`);
   lines.push(foeOK?`${B.foe.nm} ตอบถูก — ท่าของอีกฝ่ายทำงาน`
                   :`${B.foe.nm} ตอบผิด — ท่าของอีกฝ่ายไม่ทำงาน`);
 
