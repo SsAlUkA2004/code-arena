@@ -1301,6 +1301,55 @@ async function sha(txt){
 }
 
 /* =======================================================================
+   ส่วนที่ 2C : ระบบประลองสด (คิวจับคู่ + ห้องแข่งบน Firestore)
+   ======================================================================= */
+const QFRESH = 20000;   // ถือว่ายังออนไลน์ถ้าเช็คอินภายใน 20 วินาที
+
+const LIVE = {
+  ready(){ return CLOUD },
+
+  /* ---------- คิวรอจับคู่ ---------- */
+  async join(entry){
+    await fx.setDoc(fx.doc(FS,"queue",ME), Object.assign({},entry,{at:Date.now(),match:null}));
+  },
+  async beat(){
+    try{ await fx.updateDoc(fx.doc(FS,"queue",ME),{at:Date.now()}) }catch(e){}
+  },
+  async leave(){
+    try{ await fx.deleteDoc(fx.doc(FS,"queue",ME)) }catch(e){}
+  },
+  async mine(){
+    const s=await fx.getDoc(fx.doc(FS,"queue",ME));
+    return s.exists()? s.data() : null;
+  },
+  async waiting(loRp,hiRp){                       // คนที่รออยู่ในช่วงคะแนนนี้
+    const s=await fx.getDocs(fx.query(fx.collection(FS,"queue"), fx.limit(50)));
+    const now=Date.now();
+    return s.docs.map(d=>({k:d.id,...d.data()}))
+      .filter(x=>x.k!==ME && x.k!==CFG.adminUser && !x.match
+                 && now-(x.at||0) < QFRESH
+                 && (x.rp||0)>=loRp && (x.rp||0)<=hiRp);
+  },
+
+  /* ---------- ห้องแข่ง ---------- */
+  async createMatch(id,data){ await fx.setDoc(fx.doc(FS,"matches",id),data) },
+  async getMatch(id){ const s=await fx.getDoc(fx.doc(FS,"matches",id)); return s.exists()?s.data():null },
+  async tagQueue(k,id){ try{ await fx.updateDoc(fx.doc(FS,"queue",k),{match:id}) }catch(e){} },
+
+  /* ---------- ข้อมูลรายรอบ ---------- */
+  async submit(id,n,side,payload){
+    await fx.setDoc(fx.doc(FS,"matches",id,"r",String(n)), {[side]:payload}, {merge:true});
+  },
+  watchRound(id,n,cb){
+    return fx.onSnapshot(fx.doc(FS,"matches",id,"r",String(n)), s=>cb(s.exists()?s.data():{}));
+  },
+  async quit(id,side){
+    try{ await fx.setDoc(fx.doc(FS,"matches",id),{quit:side},{merge:true}) }catch(e){}
+  },
+  watchMatch(id,cb){ return fx.onSnapshot(fx.doc(FS,"matches",id), s=>cb(s.exists()?s.data():null)) }
+};
+
+/* =======================================================================
    ส่วนที่ 2 : ค่าสมดุลของเกม  ← ครูปรับตัวเลขได้
    ======================================================================= */
 const CFG = {
@@ -1497,7 +1546,10 @@ function refreshTop(){
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>go(b.dataset.v));
 function go(v){
   clearInterval(TICK);
-  if(MTICK&&v!=="battle")stopSearch();
+  if(MTICK&&v!=="battle"){stopSearch(); if(LIVE.ready())LIVE.leave();}
+  if(B&&B.live&&!B.ended&&v!=="battle"){
+    B.ended=true; if(LIVE.ready())LIVE.quit(B.mid,B.side); liveCleanup();
+  }
   ["Map","Lesson","Battle","Pvp","Board","Profile","Admin","Help"].forEach(x=>$("view"+x).classList.add("hide"));
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.v===v));
   if(v==="map")drawMap(); if(v==="pvp")drawPvp(); if(v==="board")drawBoard();
@@ -1583,11 +1635,10 @@ function startStage(n,d){
      pool,queue:shuffle(pool.slice()),time:D.time,round:0,correct:0,total:0};
   renderBattle();
 }
-function tierRange(t){                      // ช่วงคะแนนที่นับว่าอยู่ในระยะจับคู่
+function tierRange(t){
   const lo=Math.max(0,t-CFG.tierGap), hi=Math.min(TIERS.length-2,t+CFG.tierGap);
   return {lo:TIERS[lo].lo, hi: hi>=6 ? 999999 : TIERS[hi].hi};
 }
-/* คืนค่า {list, scanned, error} เพื่อให้รู้ว่าหาไม่เจอเพราะอะไร */
 async function eligibleFoes(myT){
   const r=tierRange(myT);
   try{
@@ -1595,28 +1646,37 @@ async function eligibleFoes(myT){
     const list=raw.map(x=>({k:x.k,nm:dispName(x.u,x.k),rp:x.u.rp||0,rk:rankOf(x.u.rp||0,null)}))
                   .filter(x=>Math.abs(x.rk.t-myT)<=CFG.tierGap);
     return {list, scanned:raw.length, error:null};
-  }catch(e){
-    console.error("จับคู่ไม่สำเร็จ:",e);
-    return {list:[], scanned:0, error:(e&&e.message)||String(e)};
-  }
+  }catch(e){ return {list:[], scanned:0, error:(e&&e.message)||String(e)} }
 }
-let MTICK=null;
+
+/* ================= คิวจับคู่ประลองสด ================= */
+let MTICK=null, MSTOP=null;
+const FLATQ = STAGES.flatMap(s=>s.q);            // คลังข้อสอบเรียงเหมือนกันทุกเครื่อง
+
 async function startRanked(){
   const R=rankOf(U.rp,MYPOS);
-  const res=await eligibleFoes(R.t);
-  if(res.list.length) return beginMatch(res.list[Math.floor(Math.random()*res.list.length)],R);
-  searchMatch(R,res);
+  if(!LIVE.ready()) return searchMatch(R,null);   // โหมดออฟไลน์ ใช้บอทอย่างเดียว
+  const r=tierRange(R.t);
+  try{
+    await LIVE.join({uname:ME,nm:myName(),rp:U.rp||0,t:R.t});
+  }catch(e){
+    console.error(e);
+    return searchMatch(R,{list:[],scanned:0,error:"เข้าคิวไม่สำเร็จ: "+((e&&e.message)||e)});
+  }
+  searchMatch(R,null,r);
 }
-function searchMatch(R,first){
-  let left=CFG.matchSeconds, found=0, scanned=first?first.scanned:0, err=first?first.error:null;
+
+function searchMatch(R,first,range){
+  let left=CFG.matchSeconds, waiting=0, err=first?first.error:null, closing=false;
   const lo=Math.max(0,R.t-CFG.tierGap), hi=Math.min(TIERS.length-1,R.t+CFG.tierGap);
   const span=TIERS.slice(lo,hi+1).map(x=>`<span style="color:${x.c}">${x.nm}</span>`).join(" · ");
   const paint=()=>{
     const t=$("mmT"); if(t)t.textContent=`${Math.floor(left/60)}:${String(left%60).padStart(2,"0")}`;
-    const d=$("mmInfo"); if(d)d.innerHTML=
-      err ? `<b style="color:var(--atk)">อ่านข้อมูลผู้เล่นไม่สำเร็จ: ${err}</b>`
-          : `พบผู้เล่นที่คะแนนอยู่ในช่วงนี้ <b>${scanned}</b> คน · เข้าเกณฑ์จับคู่ <b>${found}</b> คน`
-          + (scanned===0?`<br><span style="color:var(--gold)">ยังไม่มีเพื่อนคนอื่นอยู่ในช่วงแรงค์นี้ — ให้เพื่อนสมัครและเล่นด่านให้ผ่าน ${CFG.unlockPvpAfter} ด่านก่อน</span>`:"");
+    const d=$("mmInfo"); if(!d)return;
+    d.innerHTML = err ? `<b style="color:var(--atk)">${err}</b>`
+      : !LIVE.ready() ? `โหมดออฟไลน์ — ไม่มีการจับคู่สด จะสู้กับบอทเมื่อครบเวลา`
+      : `กำลังรอประลองอยู่ตอนนี้ <b style="color:${waiting?"var(--hp)":"var(--gold)"}">${waiting}</b> คนในช่วงแรงค์นี้`
+        + (waiting?"":`<br><span style="color:var(--gold)">ให้เพื่อนกดปุ่มเริ่มประลองพร้อมกัน แล้วจะจับคู่กันเอง</span>`);
   };
   $("viewBattle").innerHTML=`
     <div class="panel result">
@@ -1625,25 +1685,77 @@ function searchMatch(R,first){
       <p class="note">หาผู้เล่นในช่วงแรงค์ ${span}</p>
       <p class="dsp" style="font-size:34px;margin:14px 0" id="mmT">3:00</p>
       <p class="note" id="mmInfo"></p>
-      <p class="note" style="margin-top:8px">ถ้าครบเวลาแล้วยังไม่เจอ จะจับคู่กับบอทแรงค์ ${R.nm} ให้อัตโนมัติ</p>
+      <p class="note" style="margin-top:8px">ครบเวลาแล้วยังไม่เจอ จะจับคู่กับบอทแรงค์ ${R.nm} ให้อัตโนมัติ</p>
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:18px">
         <button class="primary" onclick="skipSearch()">สู้กับบอทเลย</button>
-        <button class="ghost" onclick="stopSearch();go('pvp')">ยกเลิก</button>
+        <button class="ghost" onclick="cancelSearch()">ยกเลิก</button>
       </div>
     </div>`;
   go("battle");paint();
-  MTICK=setInterval(async()=>{
+
+  const tick=async()=>{
+    if(closing)return;
     left--;paint();
-    if(left%3===0){
-      const res=await eligibleFoes(R.t);
-      scanned=res.scanned; found=res.list.length; err=res.error; paint();
-      if(res.list.length&&MTICK){stopSearch();return beginMatch(res.list[Math.floor(Math.random()*res.list.length)],R)}
-    }
-    if(left<=0){stopSearch();beginMatch(null,R)}
-  },1000);
+    if(left<=0){closing=true;stopSearch();await LIVE.ready()&&LIVE.leave();return beginMatch(null,R)}
+    if(!LIVE.ready())return;
+    try{
+      await LIVE.beat();
+      const mine=await LIVE.mine();
+      if(mine&&mine.match){                       // มีคนจับคู่เราไว้แล้ว
+        closing=true;stopSearch();
+        const m=await LIVE.getMatch(mine.match);
+        await LIVE.leave();
+        if(m) return beginLive(mine.match,m,R);
+        return beginMatch(null,R);
+      }
+      const list=await LIVE.waiting(range.lo,range.hi);
+      const ok=list.filter(x=>Math.abs(rankOf(x.rp,null).t-R.t)<=CFG.tierGap);
+      waiting=ok.length;paint();
+      // ใครชื่อผู้ใช้เรียงก่อน เป็นคนสร้างห้อง กันสร้างซ้อนกัน
+      const partner=ok.find(x=>ME<x.k);
+      if(partner){
+        closing=true;stopSearch();
+        const id=ME+"__"+partner.k+"__"+Date.now().toString(36);
+        const qs=shuffle(FLATQ.map((_,i)=>i)).slice(0,40);
+        const data={a:ME,b:partner.k,an:myName(),bn:partner.nm,
+                    at:R.t,bt:rankOf(partner.rp,null).t,qs,start:Date.now()};
+        await LIVE.createMatch(id,data);
+        await LIVE.tagQueue(partner.k,id);
+        await LIVE.leave();
+        return beginLive(id,data,R);
+      }
+    }catch(e){ err="เชื่อมต่อคิวไม่สำเร็จ: "+((e&&e.message)||e); paint(); }
+  };
+  MTICK=setInterval(tick,1500);
 }
-function skipSearch(){stopSearch();beginMatch(null,rankOf(U.rp,MYPOS))}
 function stopSearch(){clearInterval(MTICK);MTICK=null}
+function cancelSearch(){stopSearch(); if(LIVE.ready())LIVE.leave(); go("pvp")}
+function skipSearch(){stopSearch(); if(LIVE.ready())LIVE.leave(); beginMatch(null,rankOf(U.rp,MYPOS))}
+
+/* ================= เริ่มการประลองสด ================= */
+function beginLive(id,m,R){
+  const side = (m.a===ME) ? "a" : "b";
+  const myT  = side==="a" ? m.at : m.bt;
+  const oT   = side==="a" ? m.bt : m.at;
+  const oNm  = side==="a" ? m.bn : m.an;
+  const myHp = pvpHp(myT), oHp = pvpHp(oT);
+  B={mode:"ranked",live:true,mid:id,side,hideMode:"always",
+     canHeal:myT>=CFG.healFromTier, canUlt:myT>=CFG.ultFromTier,
+     me:{hp:myHp,max:myHp,nm:myName(),face:$("avatar").textContent,shield:false,streak:0},
+     foe:{hp:oHp,max:oHp,nm:oNm,rankName:TIERS[oT].nm,rankColor:TIERS[oT].c,face:"🧑‍💻",
+          dmg:{atk:CFG.dmg.atk,pen:CFG.dmg.pen},shield:false,streak:0,
+          canHeal:oT>=CFG.healFromTier, canUlt:oT>=CFG.ultFromTier},
+     qs:m.qs, time:CFG.pvpTime, round:0, correct:0, total:0};
+  MSTOP=LIVE.watchMatch(id,d=>{
+    if(d&&d.quit&&d.quit!==side&&!B.ended){
+      B.ended=true; B.foe.hp=0;
+      $("log").innerHTML=`<b style="color:var(--hp)">${B.foe.nm} ออกจากการประลอง คุณชนะโดยปริยาย</b>`;
+      setTimeout(finish,1200);
+    }
+  });
+  renderBattle();
+}
+function liveCleanup(){ if(MSTOP){MSTOP();MSTOP=null} }
 
 function beginMatch(opp,R){
   const myHp=pvpHp(R.t);
@@ -1719,26 +1831,33 @@ function useHeal(){
   if(B.picked||B.me.streak<CFG.healStreak)return;
   const before=B.me.hp;
   B.me.hp=Math.min(B.me.max,B.me.hp+CFG.heal);
-  B.me.streak=0;
+  B.me.streak=0;B.healedNow=true;
   $("log").innerHTML=`💚 ใช้สกิลฮีล ฟื้นพลังชีวิต ${B.me.hp-before} HP — สถิติตอบถูกติดกันเริ่มนับใหม่ ตอนนี้เลือกท่าได้ตามปกติ`;
   paintHP();drawSkills();
 }
 function nextRound(){
   clearInterval(TICK);
   if(B.me.hp<=0||B.foe.hp<=0) return finish();
-  B.round++;B.picked=false;
+  B.round++;B.picked=false;B.healedNow=false;
   B.foeHealed=0;
-  if(B.foe.canHeal&&B.foe.streak>=CFG.healStreak&&B.foe.hp<B.foe.max){
-    const before=B.foe.hp;B.foe.hp=Math.min(B.foe.max,B.foe.hp+CFG.heal);
-    B.foeHealed=B.foe.hp-before;B.foe.streak=0;
+  if(B.live){
+    B.foeMove=null;
+    B.q=FLATQ[B.qs[(B.round-1)%B.qs.length]];
+  }else{
+    if(B.foe.canHeal&&B.foe.streak>=CFG.healStreak&&B.foe.hp<B.foe.max){
+      const before=B.foe.hp;B.foe.hp=Math.min(B.foe.max,B.foe.hp+CFG.heal);
+      B.foeHealed=B.foe.hp-before;B.foe.streak=0;
+    }
+    B.foeMove=(B.foe.canUlt&&B.foe.streak>=CFG.ultStreak)
+      ? "ult" : ["atk","pen","def"][Math.floor(Math.random()*3)];
+    if(!B.queue.length)B.queue=shuffle(B.pool.slice());
+    B.q=B.queue.pop();
   }
-  B.foeMove=(B.foe.canUlt&&B.foe.streak>=CFG.ultStreak)
-    ? "ult" : ["atk","pen","def"][Math.floor(Math.random()*3)];
   B.foeHidden=isHidden();
-  if(!B.queue.length)B.queue=shuffle(B.pool.slice());
-  B.q=B.queue.pop();
   $("qbox").classList.add("hide");
-  $("intent").innerHTML = B.foeHidden
+  $("intent").innerHTML = B.live
+    ? `รอบที่ ${B.round} — ประลองสดกับ <b>${B.foe.nm}</b> · ท่าของอีกฝ่าย <b>🎴 ปิดไพ่ไว้</b>`
+    : B.foeHidden
     ? `รอบที่ ${B.round} — ${B.foe.nm} เลือกท่าไว้แล้ว <b>🎴 ปิดไพ่ไว้</b> จะเปิดเมื่อตอบคำถามเสร็จ`
     : `รอบที่ ${B.round} — ${B.foe.nm} กำลังเตรียม ${moveTag(B.foeMove)}`;
   const showUlt=B.canUlt&&B.me.streak>=CFG.ultStreak;
@@ -1794,11 +1913,33 @@ function answer(i,btn){
   document.querySelectorAll(".opt").forEach(b=>{b.disabled=true;if(+b.dataset.i===B.q.a)b.classList.add("right")});
   const meOK=(i===B.q.a);
   if(!meOK&&btn)btn.classList.add("wrong");
-  const foeOK=Math.random()<B.foe.acc;
+  if(B.live) return submitLive(meOK);
+  resolveRound(meOK, Math.random()<B.foe.acc);
+}
+async function submitLive(meOK){
+  $("log").innerHTML=`ส่งคำตอบแล้ว กำลังรอ <b>${B.foe.nm}</b> ตอบ...`;
+  let unsub=null, done=false;
+  const other=B.side==="a"?"b":"a";
+  const close=fp=>{
+    if(done)return; done=true;
+    if(unsub)unsub(); clearTimeout(dl);
+    B.foeMove = (fp&&fp.mv) ? fp.mv : "atk";
+    B.foeHealed = (fp&&fp.heal) ? CFG.heal : 0;
+    if(B.foeHealed){B.foe.hp=Math.min(B.foe.max,B.foe.hp+CFG.heal);B.foe.streak=0}
+    resolveRound(meOK, !!(fp&&fp.ok), !fp);
+  };
+  const dl=setTimeout(()=>close(null),(CFG.pvpTime+12)*1000);
+  try{
+    await LIVE.submit(B.mid,B.round,B.side,{mv:B.myMove,ok:meOK,heal:B.healedNow?1:0});
+    unsub=LIVE.watchRound(B.mid,B.round,d=>{ if(d&&d[other])close(d[other]) });
+  }catch(e){ console.error(e); close(null) }
+}
+function resolveRound(meOK,foeOK,timedOut){
   if(meOK){B.correct++; B.myMove==="ult"?B.me.streak=0:B.me.streak++;} else B.me.streak=0;
   if(foeOK){B.foeMove==="ult"?B.foe.streak=0:B.foe.streak++;} else B.foe.streak=0;
 
   const lines=[];
+  if(timedOut)lines.push(`⏱️ ${B.foe.nm} ตอบไม่ทันเวลา`);
   if(B.foeHealed)lines.push(`💚 ${B.foe.nm} ใช้สกิลฮีล ฟื้น ${B.foeHealed} HP`);
   lines.push(`${B.foeHidden?`${B.foe.nm} เปิดไพ่: `:``}${moveTag(B.foeMove)} · คุณเลือก ${moveTag(B.myMove)}`);
   lines.push(meOK?`<b style="color:var(--hp)">คุณตอบถูก</b> — ท่าของคุณทำงาน`
@@ -1846,6 +1987,7 @@ function hit(id){const e=$(id);e.classList.remove("shake");void e.offsetWidth;e.
    ส่วนที่ 9 : สรุปผลและรางวัล
    ======================================================================= */
 async function finish(){
+  liveCleanup();
   const won=B.foe.hp<=0 && B.me.hp>0;
   let xp=0,first=false,rp=0,oldRank=rankOf(U.rp,MYPOS);
   if(B.mode==="stage"){
