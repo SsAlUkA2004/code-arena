@@ -2095,6 +2095,34 @@ async function eligibleFoes(myT){
 /* ================= คิวจับคู่ประลองสด ================= */
 let MTICK=null, MSTOP=null;
 const FLATQ = STAGES.flatMap(s=>s.q);            // คลังข้อสอบเรียงเหมือนกันทุกเครื่อง
+/* สัดส่วนระดับข้อสอบในสนามประลอง แยกตามแรงค์ [ง่าย, กลาง, ยาก] เป็นเปอร์เซ็นต์
+   บรอนซ์ ซิลเวอร์ โกลด์ แพลทินัม ไดมอนด์ ตำนาน ซูพรีม เทพคอม */
+const QMIX=[[90,10,0],[70,30,0],[60,40,0],[40,50,10],[20,60,20],[0,60,40],[0,30,70],[0,10,90]];
+const POOL_LV=[[],[],[]];
+FLATQ.forEach((q,i)=>POOL_LV[q.lv-1].push(i));
+/* ถ้าสองฝ่ายคนละแรงค์ ใช้ค่าเฉลี่ยของทั้งคู่ เพื่อไม่ให้ฝ่ายใดได้เปรียบ */
+function mixFor(tA,tB){
+  const a=QMIX[Math.min(tA,7)], b=QMIX[Math.min(tB===undefined?tA:tB,7)];
+  return [0,1,2].map(i=>(a[i]+b[i])/2);
+}
+function buildQs(dist,n){
+  const out=[];
+  [0,1,2].forEach(l=>{
+    const cnt=Math.round(dist[l]/100*n);
+    if(!cnt||!POOL_LV[l].length)return;
+    const p=shuffle(POOL_LV[l].slice());
+    for(let i=0;i<cnt;i++)out.push(p[i%p.length]);
+  });
+  while(out.length<n){
+    const l=dist[1]>0?1:(dist[2]>0?2:0);
+    out.push(POOL_LV[l][Math.floor(Math.random()*POOL_LV[l].length)]);
+  }
+  return shuffle(out).slice(0,n);
+}
+function mixText(dist){
+  return ["ง่าย","กลาง","ยาก"].map((n,i)=>dist[i]>0?`${n} ${Math.round(dist[i])}%`:null)
+    .filter(Boolean).join(" · ");
+}
 
 async function startRanked(){
   const R=rankOf(U.rp,MYPOS);
@@ -2159,7 +2187,7 @@ function searchMatch(R,first,range){
       if(partner){
         closing=true;stopSearch();
         const id=ME+"__"+partner.k+"__"+Date.now().toString(36);
-        const qs=shuffle(FLATQ.map((_,i)=>i)).slice(0,40);
+        const qs=buildQs(mixFor(R.t, rankOf(partner.rp,null).t), 40);
         const data={a:ME,b:partner.k,an:myName(),bn:partner.nm,
                     at:R.t,bt:rankOf(partner.rp,null).t,
                     arp:U.rp||0,brp:partner.rp||0,qs,start:Date.now()};
@@ -2206,6 +2234,7 @@ function beginMatch(opp,R){
   const myHp=pvpHp(R.t);
   const oT = opp? opp.rk.t : R.t;
   const oHp= pvpHp(oT);
+  const qset= buildQs(mixFor(R.t,oT),40).map(i=>FLATQ[i]);
   B={mode:"ranked",hideMode:"always",
      canHeal:R.t>=CFG.healFromTier, canUlt:R.t>=CFG.ultFromTier,
      me:{hp:myHp,max:myHp,nm:myName(),face:$("avatar").textContent,shield:false,streak:0},
@@ -2216,7 +2245,7 @@ function beginMatch(opp,R){
           dmg:{atk:CFG.dmg.atk,pen:CFG.dmg.pen},shield:false,streak:0,
           acc:CFG.botAcc[oT],
           canHeal:oT>=CFG.healFromTier, canUlt:oT>=CFG.ultFromTier},
-     pool:STAGES.flatMap(s=>s.q),queue:shuffle(STAGES.flatMap(s=>s.q)),
+     pool:qset,queue:shuffle(qset.slice()),
      time:CFG.pvpTime,round:0,correct:0,total:0};
   renderBattle();
 }
@@ -2511,7 +2540,7 @@ async function finish(){
    ส่วนที่ 10 : สนามประลอง / กระดานผู้นำ / กติกา
    ======================================================================= */
 function rankTable(myRp){
-  return `<table><tr><th>แรงค์</th><th>ช่วงคะแนน</th><th>เลือด</th><th>ชนะ / แพ้</th><th>บอท</th><th>สกิล</th></tr>
+  return `<table><tr><th>แรงค์</th><th>ช่วงคะแนน</th><th>เลือด</th><th>ชนะ / แพ้</th><th>บอท</th><th>ข้อสอบ ง่าย/กลาง/ยาก</th><th>สกิล</th></tr>
   ${TIERS.map((T,i)=>{
     const inIt = i===7 ? (myRp>=CFG.godMinRp) : (i===6 ? myRp>=3001 : (myRp>=T.lo&&myRp<=T.hi));
     const range = i===7 ? `${CFG.godMinRp}+ และติด ${CFG.godTop} อันดับแรก` : (T.hi?`${T.lo} – ${T.hi}`:`${T.lo} ขึ้นไป`);
@@ -2521,6 +2550,7 @@ function rankTable(myRp){
       <td>${range}</td><td>${pvpHp(i)}</td>
       <td><span style="color:var(--hp)">+${winRp(ref)}</span> / <span style="color:var(--atk)">${loseRp(ref)}</span></td>
       <td>${Math.round(CFG.botAcc[i]*100)}%</td>
+      <td class="note">${QMIX[i][0]} / ${QMIX[i][1]} / ${QMIX[i][2]}</td>
       <td class="note">${sk}</td></tr>`;
   }).join("")}</table>
   <p class="note" style="margin-top:10px">คะแนนชนะ/แพ้ในตารางคิดจากคะแนนต่ำสุดของแรงค์นั้น ยิ่งสะสมคะแนนสูงขึ้นภายในแรงค์เดียวกัน ชนะก็จะได้น้อยลงและแพ้เสียมากขึ้นเรื่อย ๆ</p>`;
@@ -2545,7 +2575,8 @@ async function drawPvp(){
     <div class="panel" style="margin-bottom:16px">
       <h2>สนามประลองจัดอันดับ</h2>
       <p class="note" style="margin:8px 0 16px">ฤดูกาลที่ ${SEASON.n} · เหลืออีก ${daysLeft()} วันจะรีเซ็ตคะแนนแรงค์ทั้งหมด (เลเวลและด่านที่ผ่านแล้วไม่หาย) ·
-      สุ่มคำถามจากคลังทั้งหมด ${nQ} ข้อ · ท่าของคู่ต่อสู้ปิดไพ่ไว้เสมอ</p>
+      สุ่มคำถามจากคลัง ${nQ} ข้อ โดยแรงค์ ${R.nm} จะได้ระดับ <b>${mixText(QMIX[Math.min(R.t,7)])}</b>
+      (ถ้าเจอคู่ต่อสู้คนละแรงค์ ระบบจะใช้ค่าเฉลี่ยของทั้งสองฝ่าย) · ท่าของคู่ต่อสู้ปิดไพ่ไว้เสมอ</p>
       <div class="grid2">
         <div class="rw" style="text-align:center">แรงค์ปัจจุบัน<b style="color:${R.c}">${R.full}</b>${U.rp} คะแนน · อันดับที่ ${pos||"-"}</div>
         <div class="rw" style="text-align:center">พลังชีวิตในประลอง<b>${pvpHp(R.t)}</b>ชนะ +${winRp(U.rp)} · แพ้ ${loseRp(U.rp)}</div>
@@ -2654,6 +2685,12 @@ function drawHelp(){
       <li>หาคู่ไม่เจอภายใน ${Math.round(CFG.matchSeconds/60)} นาที ระบบจะจับคู่กับบอทแรงค์เดียวกับเราให้แทน</li>
       <li>ทั้งสองฝั่งใช้พลังชีวิตและสกิลตามแรงค์ของตัวเอง ถ้าเจอคนแรงค์สูงกว่า เขาอาจมีเลือดหรือสกิลมากกว่าเรา</li>
       <li>ในสนามประลองต้องเลือกท่าภายใน ${CFG.pickSeconds} วินาที ถ้าไม่ทันระบบจะสุ่มท่าให้ ส่วนในด่านไม่จำกัดเวลาเลือกท่า</li></ul>
+      <h3 style="margin-top:22px">ระดับข้อสอบในสนามประลองขึ้นกับแรงค์</h3>
+      <p>ยิ่งแรงค์สูง ข้อสอบยิ่งยากขึ้น เพื่อให้การไต่อันดับวัดความเข้าใจจริง ไม่ใช่วัดความเร็วมืออย่างเดียว</p>
+      <table><tr><th>แรงค์</th><th>ง่าย</th><th>กลาง</th><th>ยาก</th></tr>
+      ${TIERS.map((T,i)=>`<tr><td style="color:${T.c}">${T.nm}</td>
+        <td>${QMIX[i][0]}%</td><td>${QMIX[i][1]}%</td><td>${QMIX[i][2]}%</td></tr>`).join("")}</table>
+      <p>ถ้าจับคู่กับคนที่อยู่คนละแรงค์ ระบบจะใช้ค่าเฉลี่ยของทั้งสองฝ่าย เช่น ไดมอนด์เจอตำนานจะได้ ง่าย 10% กลาง 60% ยาก 30% ทั้งคู่ได้ข้อสอบชุดเดียวกันเสมอ</p>
       <h3 style="margin-top:22px">ถ้าเสมอกันจะเกิดอะไรขึ้น</h3>
       <p>ในสนามประลองทั้งสองฝ่ายลงมือพร้อมกัน จึงมีโอกาสที่พลังชีวิตจะหมดพร้อมกัน ผลจะเป็น <b style="color:var(--gold)">เสมอ</b> และคิดคะแนนดังนี้</p>
       <ul><li><b>อยู่แรงค์เดียวกัน</b> — คะแนนไม่เปลี่ยนแปลงทั้งสองฝ่าย</li>
