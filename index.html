@@ -2580,9 +2580,12 @@ async function drawBoard(){
   ]);
   await refreshPos();
   const rows=rpTop.map((r,i)=>{
-    const R=rankOf(r.u.rp||0,i+1), L=lvOf(r.u.xp||0), cl=clearedCount(r.u);
+    const R=rankOf(r.u.rp||0,i+1), L=lvOf(r.u.xp||0), p=pvpStat(r.u,"S");
     return `<tr class="${r.k===ME?"me":""}"><td class="pos">${i+1}</td><td>${dispName(r.u,r.k)}</td>
-      <td style="color:${R.c}">${R.full}</td><td>${r.u.rp||0}</td><td>${L.lv}</td><td>${cl}/20</td></tr>`;
+      <td style="color:${R.c}">${R.full}</td><td>${r.u.rp||0}</td>
+      <td>${p.n?`<b>${p.rate}%</b>`:`<span class="note">—</span>`}</td>
+      <td class="note">${p.n?`${p.n} นัด · ${p.w}-${p.l}-${p.d}`:"ยังไม่ลงสนาม"}</td>
+      <td>${L.lv}</td></tr>`;
   }).join("");
   const lvRows=xpTop.map((r,i)=>{
     const L=lvOf(r.u.xp||0), cl=clearedCount(r.u), R=rankOf(r.u.rp||0,null);
@@ -2604,7 +2607,8 @@ async function drawBoard(){
       <p class="note" style="margin:6px 0 12px">ฤดูกาลที่ ${SEASON.n} · เหลืออีก ${daysLeft()} วัน · นักเรียนในระบบ ${total} คน ·
       แรงค์ <b style="color:${TIERS[7].c}">เทพคอม</b> ต้องมีคะแนนตั้งแต่ ${CFG.godMinRp} ขึ้นไป <u>และ</u> ติด ${CFG.godTop} อันดับแรก ·
       ${MYPOS?`ตอนนี้คุณอยู่อันดับที่ ${MYPOS}`:"บัญชีครูไม่นับอันดับ"}</p>
-      <table><tr><th class="pos">#</th><th>นักเรียน</th><th>แรงค์</th><th>คะแนน</th><th>เลเวล</th><th>ด่าน</th></tr>${rows}</table>
+      <table><tr><th class="pos">#</th><th>นักเรียน</th><th>แรงค์</th><th>คะแนน</th><th>อัตราชนะ</th><th>ชนะ-แพ้-เสมอ</th><th>เลเวล</th></tr>${rows}</table>
+      <p class="note" style="margin-top:10px">อัตราชนะนับเฉพาะการประลองในฤดูกาลนี้ ไม่รวมการเล่นด่าน</p>
     </div>
     <div class="panel" style="margin-bottom:16px">
       <h2>กระดานเลเวลสูงสุด</h2>
@@ -2682,7 +2686,6 @@ async function drawProfile(){
   const totalUsers=await DAL.countUsers();
   const cd=canNick(U);
   const left=Math.ceil((nickReadyAt(U)-Date.now())/86400000);
-  const total=(U.wins||0)+(U.losses||0);
   $("viewProfile").innerHTML=`
     <div class="panel" style="margin-bottom:16px">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
@@ -2702,14 +2705,14 @@ async function drawProfile(){
         <li><span>โหมดข้อมูล</span><b>${CLOUD?"☁️ เชื่อมต่อคลาวด์":"💾 ออฟไลน์ (เครื่องนี้เท่านั้น)"}</b></li>
         <li><span>คะแนนแรงค์สูงสุดที่เคยทำได้</span><b>${Math.max(U.bestRp||0,U.rp||0)}</b></li>
         <li><span>ด่านที่ผ่านแล้ว</span><b>${clearedCount(U)} / 20</b></li>
-        <li><span>ชนะ / แพ้ รวมทุกโหมด</span><b>${U.wins||0} / ${U.losses||0}${total?` (${Math.round((U.wins||0)/total*100)}%)`:""}</b></li>
+        <li><span>ชนะ / แพ้ สะสมทุกโหมด</span><b>${U.wins||0} / ${U.losses||0}</b></li>
         <li><span>จำนวนครั้งที่เล่นทั้งหมด</span><b>${U.plays||0}</b></li>
       </ul>
     </div>
 
     <div class="panel" style="margin-bottom:16px">
       <h3>สถิติสนามประลอง</h3>
-      <p class="note" style="margin:6px 0 12px">นับเฉพาะการประลองจัดอันดับ ไม่รวมการเล่นด่าน ·
+      <p class="note" style="margin:6px 0 12px">อัตราชนะคิดจากการประลองจัดอันดับเท่านั้น ไม่รวมการเล่นด่าน ·
       สถิติฤดูกาลจะเริ่มนับใหม่ทุกครั้งที่ขึ้นฤดูกาลใหม่ ส่วนสถิติตลอดกาลจะสะสมไปเรื่อย ๆ</p>
       <table>
         <tr><th></th><th>ลงสนาม</th><th>ชนะ</th><th>แพ้</th><th>เสมอ</th><th>อัตราชนะ</th></tr>
