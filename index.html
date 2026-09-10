@@ -1484,12 +1484,12 @@ const DAL = {
   async createUser(k,u){
     if(!CLOUD){ if(DB.users[k])return false; DB.users[k]=u; save(DB); return true }
     if((await fx.getDoc(uRef(k))).exists()) return false;
-    ["xp","rp","bestRp","wins","losses","plays","nickAt"].forEach(f=>u[f]=Math.max(0,Math.round(u[f]||0)));
+    ["xp","rp","bestRp","wins","losses","plays","nickAt","pvpSW","pvpSL","pvpSD","pvpAW","pvpAL","pvpAD"].forEach(f=>u[f]=Math.max(0,Math.round(u[f]||0)));
     await fx.setDoc(uRef(k), Object.assign({}, u, {uname:k}));
     return true;
   },
   async saveUser(k,u){
-    ["xp","rp","bestRp","wins","losses","plays","nickAt"].forEach(f=>u[f]=Math.max(0,Math.round(u[f]||0)));
+    ["xp","rp","bestRp","wins","losses","plays","nickAt","pvpSW","pvpSL","pvpSD","pvpAW","pvpAL","pvpAD"].forEach(f=>u[f]=Math.max(0,Math.round(u[f]||0)));
     if(!CLOUD){ DB.users[k]=u; save(DB); return }
     await fx.setDoc(uRef(k), u, {merge:true});
   },
@@ -1582,7 +1582,7 @@ const DAL = {
     const next={n:season.n+1,start:Date.now()};
     if(!CLOUD){
       DB.hall=hall.slice(0,6);DB.season=next;
-      Object.values(DB.users).forEach(u=>{u.bestRp=Math.max(u.bestRp||0,u.rp||0);u.rp=0});
+      Object.values(DB.users).forEach(u=>{u.bestRp=Math.max(u.bestRp||0,u.rp||0);u.rp=0;u.pvpSW=0;u.pvpSL=0;u.pvpSD=0});
       save(DB);
     }else{
       await fx.setDoc(fx.doc(FS,"boards","hall"),{list:hall.slice(0,6)});
@@ -1591,7 +1591,7 @@ const DAL = {
       let batch=fx.writeBatch(FS),n=0;
       for(const d of all.docs){
         const u=d.data();
-        batch.update(d.ref,{rp:0,bestRp:Math.max(u.bestRp||0,u.rp||0)});
+        batch.update(d.ref,{rp:0,bestRp:Math.max(u.bestRp||0,u.rp||0),pvpSW:0,pvpSL:0,pvpSD:0});
         if(++n>=400){await batch.commit();batch=fx.writeBatch(FS);n=0}
       }
       if(n)await batch.commit();
@@ -1753,7 +1753,14 @@ function daysLeft(){return Math.max(0,Math.ceil((seasonEnd()-Date.now())/DAY))}
 function seasonExpired(){return Date.now()-SEASON.start>=CFG.seasonDays*DAY}
 async function loadSeason(){ SEASON=await DAL.getSeason(); return SEASON }
 
-function blankUser(real){return{real:real||"",nick:"",nickAt:0,xp:0,rp:0,bestRp:0,wins:0,losses:0,clear:{},plays:0}}
+function blankUser(real){return{real:real||"",nick:"",nickAt:0,xp:0,rp:0,bestRp:0,wins:0,losses:0,clear:{},plays:0,
+  pvpSW:0,pvpSL:0,pvpSD:0,pvpAW:0,pvpAL:0,pvpAD:0}}
+/* สถิติสนามประลอง: S = ฤดูกาลนี้, A = ตลอดกาล (W ชนะ, L แพ้, D เสมอ) */
+function pvpStat(u,scope){
+  const w=u["pvp"+scope+"W"]||0, l=u["pvp"+scope+"L"]||0, d=u["pvp"+scope+"D"]||0;
+  const n=w+l+d;
+  return {w,l,d,n,rate:n?Math.round(w/n*100):0};
+}
 /* ชื่อที่แสดง: ถ้าตั้งชื่อเล่นแล้วจะเป็น ชื่อเล่น (ชื่อผู้ใช้) */
 function dispName(u,k){return (u&&u.nick)?`${u.nick} (${k})`:((u&&u.real)||k)}
 function myName(){return dispName(U,ME)}
@@ -2154,7 +2161,8 @@ function searchMatch(R,first,range){
         const id=ME+"__"+partner.k+"__"+Date.now().toString(36);
         const qs=shuffle(FLATQ.map((_,i)=>i)).slice(0,40);
         const data={a:ME,b:partner.k,an:myName(),bn:partner.nm,
-                    at:R.t,bt:rankOf(partner.rp,null).t,qs,start:Date.now()};
+                    at:R.t,bt:rankOf(partner.rp,null).t,
+                    arp:U.rp||0,brp:partner.rp||0,qs,start:Date.now()};
         await LIVE.createMatch(id,data);
         await LIVE.tagQueue(partner.k,id);
         await LIVE.leave();
@@ -2174,11 +2182,12 @@ function beginLive(id,m,R){
   const myT  = side==="a" ? m.at : m.bt;
   const oT   = side==="a" ? m.bt : m.at;
   const oNm  = side==="a" ? m.bn : m.an;
+  const oRp  = side==="a" ? (m.brp||0) : (m.arp||0);
   const myHp = pvpHp(myT), oHp = pvpHp(oT);
   B={mode:"ranked",live:true,mid:id,side,hideMode:"always",
      canHeal:myT>=CFG.healFromTier, canUlt:myT>=CFG.ultFromTier,
      me:{hp:myHp,max:myHp,nm:myName(),face:$("avatar").textContent,shield:false,streak:0},
-     foe:{hp:oHp,max:oHp,nm:oNm,rankName:TIERS[oT].nm,rankColor:TIERS[oT].c,face:"🧑‍💻",
+     foe:{hp:oHp,max:oHp,nm:oNm,rp:oRp,rankName:TIERS[oT].nm,rankColor:TIERS[oT].c,face:"🧑‍💻",
           dmg:{atk:CFG.dmg.atk,pen:CFG.dmg.pen},shield:false,streak:0,
           canHeal:oT>=CFG.healFromTier, canUlt:oT>=CFG.ultFromTier},
      qs:m.qs, time:CFG.pvpTime, round:0, correct:0, total:0};
@@ -2200,7 +2209,7 @@ function beginMatch(opp,R){
   B={mode:"ranked",hideMode:"always",
      canHeal:R.t>=CFG.healFromTier, canUlt:R.t>=CFG.ultFromTier,
      me:{hp:myHp,max:myHp,nm:myName(),face:$("avatar").textContent,shield:false,streak:0},
-     foe:{hp:oHp,max:oHp,
+     foe:{hp:oHp,max:oHp, rp: opp?(opp.rp||0):(U.rp||0),
           nm:opp?`${opp.nm} (เงา)`:`บอทฝึกซ้อม`,
           rankName:opp?opp.rk.full:R.full, rankColor:opp?opp.rk.c:R.c,
           face:opp?"🥷":"🤖",
@@ -2438,8 +2447,9 @@ function hit(id){const e=$(id);e.classList.remove("shake");void e.offsetWidth;e.
    ======================================================================= */
 async function finish(){
   liveCleanup();
-  const won=B.foe.hp<=0 && B.me.hp>0;
-  let xp=0,first=false,rp=0,oldRank=rankOf(U.rp,MYPOS);
+  const draw = B.me.hp<=0 && B.foe.hp<=0;
+  const won  = !draw && B.foe.hp<=0 && B.me.hp>0;
+  let xp=0,first=false,rp=0,drawNote="",oldRank=rankOf(U.rp,MYPOS);
   if(B.mode==="stage"){
     const D=CFG.diff[B.diff];
     if(won){
@@ -2451,9 +2461,23 @@ async function finish(){
       U.xp+=xp;U.wins++;
     }else{U.losses++;xp=Math.round(D.xp*.15);U.xp+=xp}
   }else{
-    rp=won?winRp(U.rp):loseRp(U.rp);
-    U.rp=Math.max(0,U.rp+rp);
-    xp=won?60:15;U.xp+=xp;won?U.wins++:U.losses++;
+    const myRp=U.rp||0, oRp=B.foe.rp||0;
+    if(draw){
+      const sameTier = rankOf(myRp,null).t === rankOf(oRp,null).t;
+      if(sameTier){ rp=0; drawNote="เสมอกันในแรงค์เดียวกัน คะแนนไม่เปลี่ยนแปลงทั้งสองฝ่าย"; }
+      else if(myRp>oRp){ rp=Math.round(loseRp(myRp)/2);
+        drawNote=`เสมอกับผู้เล่นที่แรงค์ต่ำกว่า คุณเป็นฝ่ายคะแนนสูงกว่าจึงถูกหักครึ่งหนึ่งของการแพ้`; }
+      else { rp=0; drawNote="เสมอกับผู้เล่นที่แรงค์สูงกว่า คุณเป็นฝ่ายคะแนนน้อยกว่าจึงไม่ถูกหักคะแนน"; }
+      xp=35;
+    }else{
+      rp=won?winRp(myRp):loseRp(myRp);
+      xp=won?60:15;
+    }
+    U.rp=Math.max(0,myRp+rp);
+    U.xp+=xp;
+    if(draw){U.pvpSD=(U.pvpSD||0)+1;U.pvpAD=(U.pvpAD||0)+1}
+    else if(won){U.wins++;U.pvpSW=(U.pvpSW||0)+1;U.pvpAW=(U.pvpAW||0)+1}
+    else {U.losses++;U.pvpSL=(U.pvpSL||0)+1;U.pvpAL=(U.pvpAL||0)+1}
   }
   U.plays++; await commit();
   if(B.mode==="ranked") await refreshPos();
@@ -2463,8 +2487,9 @@ async function finish(){
   const changed=B.mode==="ranked"&&newRank.full!==oldRank.full;
   $("viewBattle").innerHTML=`
     <div class="panel result">
-      <div class="big ${won?"win":"lose"}">${won?"ชนะ!":"พ่ายแพ้"}</div>
-      <p class="note" style="margin-top:8px">${won?`คุณเอาชนะ ${B.foe.nm} ได้สำเร็จ`:`${B.foe.nm} ยังแข็งแกร่งเกินไป กลับไปทบทวนใบความรู้แล้วลองใหม่`}</p>
+      <div class="big ${draw?"":won?"win":"lose"}" ${draw?'style="color:var(--gold)"':""}>${draw?"เสมอ!":won?"ชนะ!":"พ่ายแพ้"}</div>
+      <p class="note" style="margin-top:8px">${draw?`พลังชีวิตหมดพร้อมกันทั้งสองฝ่าย${drawNote?" — "+drawNote:""}`
+        :won?`คุณเอาชนะ ${B.foe.nm} ได้สำเร็จ`:`${B.foe.nm} ยังแข็งแกร่งเกินไป กลับไปทบทวนใบความรู้แล้วลองใหม่`}</p>
       <div class="rewards">
         <div class="rw">ตอบถูก<b>${B.correct}/${B.total}</b>${acc}%</div>
         <div class="rw">ค่าประสบการณ์<b>+${xp}</b>${first?"รวมโบนัสชนะครั้งแรก":"XP"}</div>
@@ -2625,6 +2650,11 @@ function drawHelp(){
       <li>หาคู่ไม่เจอภายใน ${Math.round(CFG.matchSeconds/60)} นาที ระบบจะจับคู่กับบอทแรงค์เดียวกับเราให้แทน</li>
       <li>ทั้งสองฝั่งใช้พลังชีวิตและสกิลตามแรงค์ของตัวเอง ถ้าเจอคนแรงค์สูงกว่า เขาอาจมีเลือดหรือสกิลมากกว่าเรา</li>
       <li>ในสนามประลองต้องเลือกท่าภายใน ${CFG.pickSeconds} วินาที ถ้าไม่ทันระบบจะสุ่มท่าให้ ส่วนในด่านไม่จำกัดเวลาเลือกท่า</li></ul>
+      <h3 style="margin-top:22px">ถ้าเสมอกันจะเกิดอะไรขึ้น</h3>
+      <p>ในสนามประลองทั้งสองฝ่ายลงมือพร้อมกัน จึงมีโอกาสที่พลังชีวิตจะหมดพร้อมกัน ผลจะเป็น <b style="color:var(--gold)">เสมอ</b> และคิดคะแนนดังนี้</p>
+      <ul><li><b>อยู่แรงค์เดียวกัน</b> — คะแนนไม่เปลี่ยนแปลงทั้งสองฝ่าย</li>
+      <li><b>อยู่คนละแรงค์</b> — ฝ่ายที่คะแนนสูงกว่าถูกหักครึ่งหนึ่งของคะแนนที่จะเสียเมื่อแพ้ ส่วนฝ่ายที่คะแนนน้อยกว่าไม่ถูกหักเลย</li>
+      <li>ทั้งสองฝ่ายได้ค่าประสบการณ์ 35 XP ซึ่งอยู่กึ่งกลางระหว่างชนะกับแพ้</li></ul>
       <h3 style="margin-top:22px">ยิ่งแต้มสูง ยิ่งพลาดไม่ได้</h3>
       <p>ตั้งแต่ซูพรีมขึ้นไป แพ้หนึ่งครั้งต้องชนะหลายครั้งกว่าจะได้คะแนนกลับคืน</p>
       <table><tr><th>คะแนนสะสม</th><th>ชนะได้</th><th>แพ้เสีย</th><th>แพ้ 1 ตา = ชนะกี่ตา</th></tr>
@@ -2672,9 +2702,24 @@ async function drawProfile(){
         <li><span>โหมดข้อมูล</span><b>${CLOUD?"☁️ เชื่อมต่อคลาวด์":"💾 ออฟไลน์ (เครื่องนี้เท่านั้น)"}</b></li>
         <li><span>คะแนนแรงค์สูงสุดที่เคยทำได้</span><b>${Math.max(U.bestRp||0,U.rp||0)}</b></li>
         <li><span>ด่านที่ผ่านแล้ว</span><b>${clearedCount(U)} / 20</b></li>
-        <li><span>ชนะ / แพ้</span><b>${U.wins||0} / ${U.losses||0}${total?` (${Math.round((U.wins||0)/total*100)}%)`:""}</b></li>
+        <li><span>ชนะ / แพ้ รวมทุกโหมด</span><b>${U.wins||0} / ${U.losses||0}${total?` (${Math.round((U.wins||0)/total*100)}%)`:""}</b></li>
         <li><span>จำนวนครั้งที่เล่นทั้งหมด</span><b>${U.plays||0}</b></li>
       </ul>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h3>สถิติสนามประลอง</h3>
+      <p class="note" style="margin:6px 0 12px">นับเฉพาะการประลองจัดอันดับ ไม่รวมการเล่นด่าน ·
+      สถิติฤดูกาลจะเริ่มนับใหม่ทุกครั้งที่ขึ้นฤดูกาลใหม่ ส่วนสถิติตลอดกาลจะสะสมไปเรื่อย ๆ</p>
+      <table>
+        <tr><th></th><th>ลงสนาม</th><th>ชนะ</th><th>แพ้</th><th>เสมอ</th><th>อัตราชนะ</th></tr>
+        ${[["ฤดูกาลที่ "+SEASON.n,"S"],["ตลอดกาล","A"]].map(([lab,sc])=>{
+          const p=pvpStat(U,sc);
+          return `<tr><td><b>${lab}</b></td><td>${p.n}</td>
+            <td style="color:var(--hp)">${p.w}</td><td style="color:var(--atk)">${p.l}</td>
+            <td style="color:var(--gold)">${p.d}</td>
+            <td><b>${p.n?p.rate+"%":"—"}</b></td></tr>`}).join("")}
+      </table>
     </div>
 
     <div class="panel" style="margin-bottom:16px">
